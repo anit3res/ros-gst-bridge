@@ -29,15 +29,33 @@
  * </refsect2>
  */
 
+#include <array>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <yaml-cpp/yaml.h>
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
 #include <gst/gst.h>
 #include <gst_bridge/rosimagesink.h>
+#include <gst_bridge/utilities.h>
 
 GST_DEBUG_CATEGORY_STATIC(rosimagesink_debug_category);
 #define GST_CAT_DEFAULT rosimagesink_debug_category
+
+
+template <size_t N>
+std::array<double, N> vector_to_array(const std::vector<double>& vec) {
+    if (vec.size() != N)
+        throw std::length_error("Vector size does not match the expected array size.");
+    std::array<double, N> arr;
+    std::copy_n(vec.begin(), N, arr.begin());
+    return arr;
+}
 
 /* prototypes */
 
@@ -59,6 +77,8 @@ enum {
   PROP_ROS_TOPIC,
   PROP_ROS_FRAME_ID,
   PROP_ROS_ENCODING,
+  PROP_ROS_CAMERA_INFO_TOPIC,
+  PROP_ROS_CAMERA_INFO_URL,
 };
 
 /* pad templates */
@@ -109,6 +129,18 @@ static void rosimagesink_class_init(RosimagesinkClass * klass)
       "ros-encoding", "encoding-string", "A hack to flexibly set the encoding string", "",
       (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property(
+    object_class, PROP_ROS_CAMERA_INFO_TOPIC,
+    g_param_spec_string(
+      "ros-camera-info-topic", "camera-info-topic", "ROS camera info topic to be published on", "gst_camera_info_pub",
+      (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property(
+    object_class, PROP_ROS_CAMERA_INFO_URL,
+    g_param_spec_string(
+      "ros-camera-info-url", "camera-info-url", "URL to the camera info file", "",
+      (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   //access gstreamer base sink events here
   basesink_class->set_caps =
     GST_DEBUG_FUNCPTR(rosimagesink_setcaps);  //gstreamer informs us what caps we're using.
@@ -130,6 +162,8 @@ static void rosimagesink_init(Rosimagesink * sink)
   sink->frame_id = g_strdup("image_frame");
   sink->encoding = g_strdup("");
   sink->init_caps = g_strdup("");
+  sink->pub_camera_info_topic = g_strdup("gst_camera_info_pub");
+  sink->camera_info_url = g_strdup("");
 }
 
 void rosimagesink_set_property(
@@ -161,6 +195,26 @@ void rosimagesink_set_property(
       sink->encoding = g_value_dup_string(value);
       break;
 
+    case PROP_ROS_CAMERA_INFO_TOPIC:
+      if (ros_base_sink->node_if) {
+        RCLCPP_ERROR(
+          ros_base_sink->node_if->logging->get_logger(), "can't change topic name once opened");
+      } else {
+        g_free(sink->pub_camera_info_topic);
+        sink->pub_camera_info_topic = g_value_dup_string(value);
+      }
+      break;
+
+    case PROP_ROS_CAMERA_INFO_URL:
+      if (ros_base_sink->node_if) {
+        RCLCPP_ERROR(
+          ros_base_sink->node_if->logging->get_logger(), "can't change camera info url once opened");
+      } else {
+        g_free(sink->camera_info_url);
+        sink->camera_info_url = g_value_dup_string(value);
+      }
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
       break;
@@ -186,6 +240,14 @@ void rosimagesink_get_property(
       g_value_set_string(value, sink->encoding);
       break;
 
+    case PROP_ROS_CAMERA_INFO_TOPIC:
+      g_value_set_string(value, sink->pub_camera_info_topic);
+      break;
+
+    case PROP_ROS_CAMERA_INFO_URL:
+      g_value_set_string(value, sink->camera_info_url);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
       break;
@@ -201,6 +263,17 @@ static gboolean rosimagesink_open(RosBaseSink * ros_base_sink)
 
   sink->pub = rclcpp::create_publisher<sensor_msgs::msg::Image>(
     ros_base_sink->node_if->parameters, ros_base_sink->node_if->topics, sink->pub_topic, qos);
+  sink->info_pub = rclcpp::create_publisher<sensor_msgs::msg::CameraInfo>(
+    ros_base_sink->node_if->parameters, ros_base_sink->node_if->topics, sink->pub_camera_info_topic, qos);
+
+  if (0 != g_strcmp0(sink->camera_info_url, "")) {
+    RCLCPP_INFO(
+      ros_base_sink->node_if->logging->get_logger(), "ros-camera-info-url=%s", sink->camera_info_url);
+    sink->camera_info_file = loadYAMLFile(sink->camera_info_url);
+  } else {
+    RCLCPP_WARN(
+      ros_base_sink->node_if->logging->get_logger(), "ros-camera-info-url is not set, no camera info loaded");
+  }
 
   return TRUE;
 }
@@ -211,6 +284,7 @@ static gboolean rosimagesink_close(RosBaseSink * ros_base_sink)
   Rosimagesink * sink = GST_ROSIMAGESINK(ros_base_sink);
   GST_DEBUG_OBJECT(sink, "close");
   sink->pub.reset();
+  sink->info_pub.reset();
   return TRUE;
 }
 
@@ -299,12 +373,17 @@ static GstFlowReturn rosimagesink_render(
 {
   GstMapInfo info;
   sensor_msgs::msg::Image msg;
+  sensor_msgs::msg::CameraInfo info_msg;
 
   Rosimagesink * sink = GST_ROSIMAGESINK(ros_base_sink);
   GST_DEBUG_OBJECT(sink, "render");
 
   msg.header.stamp = msg_time;
   msg.header.frame_id = sink->frame_id;
+
+  info_msg.header = msg.header;
+  info_msg.width = sink->width;
+  info_msg.height = sink->height;
 
   //auto msg = sink->pub->borrow_loaned_message();
   //msg.get().width =
@@ -320,8 +399,21 @@ static GstFlowReturn rosimagesink_render(
   msg.data.assign(info.data, info.data + info.size);
   gst_buffer_unmap(buf, &info);
 
+  if (sink->camera_info_file) {
+    const YAML::Node& parent_node = *(sink->camera_info_file);
+    info_msg.distortion_model = yaml_get_value<std::string>(parent_node, "distortion_model");
+    info_msg.d = yaml_get_value<std::vector<double>>(parent_node["distortion_coefficients"], "data");
+    info_msg.k = vector_to_array<9>(
+      yaml_get_value<std::vector<double>>(parent_node["camera_matrix"], "data"));
+    info_msg.r = vector_to_array<9>(
+      yaml_get_value<std::vector<double>>(parent_node["rectification_matrix"], "data"));
+    info_msg.p = vector_to_array<12>(
+      yaml_get_value<std::vector<double>>(parent_node["projection_matrix"], "data"));
+  }
+
   //publish
   sink->pub->publish(msg);
+  sink->info_pub->publish(info_msg);
 
   return GST_FLOW_OK;
 }

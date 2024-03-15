@@ -26,7 +26,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-
+find_package(yaml_cpp_vendor REQUIRED)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
@@ -123,6 +123,7 @@ target_include_directories(rosgstbridge PRIVATE
 
 target_link_libraries(rosgstbridge PUBLIC
   gst_bridge
+  yaml-cpp
   ${rclcpp_LIBRARIES}
   ${sensor_msgs_LIBRARIES}
   ${audio_msgs_LIBRARIES}
@@ -173,4 +174,3 @@ ament_export_dependencies(
 ament_package(
   CONFIG_EXTRAS
 )
-

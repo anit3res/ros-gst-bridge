@@ -19,14 +19,19 @@
 #ifndef _GST_ROSIMAGESINK_H_
 #define _GST_ROSIMAGESINK_H_
 
+#include <memory>
+
 #include <gst/base/gstbasesink.h>
 #include <gst/video/video-format.h>
 #include <gst_bridge/gst_bridge.h>
 #include <gst_bridge/rosbasesink.h>
 
+#include <yaml-cpp/yaml.h>
+
 //include ROS and ROS message formats
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 
 G_BEGIN_DECLS
 
@@ -50,7 +55,12 @@ struct _Rosimagesink
   gchar * encoding;   //image topic encoding string
   gchar * init_caps;  //optional caps override (used for limited apis)
 
+  gchar * pub_camera_info_topic;
+  gchar * camera_info_url;
+  std::shared_ptr<YAML::Node> camera_info_file;
+
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub;
 
   int height;
   int width;
